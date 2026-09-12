@@ -1,6 +1,5 @@
 node_modules/
 n8n/
-security/
 *.log
 __pycache__/
 *.pyc
