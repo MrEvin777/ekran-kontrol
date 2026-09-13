@@ -48,6 +48,26 @@ except Exception:
     sd = None
     sf = None
 
+# pytesseract 0.3.10/0.3.13 both do `from pkgutil import find_loader`, removed in
+# Python 3.13+. Shim it back so `import pytesseract` (in ocr_screen) doesn't crash.
+import pkgutil as _pkgutil
+
+if not hasattr(_pkgutil, "find_loader"):
+    import importlib.util as _importlib_util
+
+    _pkgutil.find_loader = lambda name: _importlib_util.find_spec(name)
+
+# Point pytesseract at the real tesseract.exe -- winget installs it but does not
+# add it to PATH, so a bare `pytesseract.image_to_string()` fails without this.
+_TESSERACT_EXE = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+if _TESSERACT_EXE.exists():
+    try:
+        import pytesseract as _pytesseract
+
+        _pytesseract.pytesseract.tesseract_cmd = str(_TESSERACT_EXE)
+    except Exception:
+        pass
+
 pyautogui.FAILSAFE = True
 
 HYPER_ROUTER_URL = "http://localhost:20129"
@@ -220,6 +240,45 @@ def _oai_tools_to_anthropic(schemas):
 
 
 ANTHROPIC_TOOLS = _oai_tools_to_anthropic(TOOL_SCHEMAS)
+
+_TOOL_SCHEMA_BY_NAME = {s["function"]["name"]: s["function"] for s in TOOL_SCHEMAS}
+_JSON_TYPE_CHECKS = {
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "array": lambda v: isinstance(v, list),
+    "object": lambda v: isinstance(v, dict),
+}
+
+
+def validate_tool_call(name, args):
+    """Rejects an unknown tool name, a non-dict argument bag, a missing required
+    field, or a field of the wrong JSON type -- BEFORE the tool runs. Every model
+    (cloud or local) goes through this: a local model is more likely to hallucinate
+    a bad call, but a cloud model can too, so the gate is unconditional, not
+    provider-specific.
+    """
+    schema = _TOOL_SCHEMA_BY_NAME.get(name)
+    if schema is None:
+        return False, f"Bilinmeyen arac adi: '{name}'"
+    if not isinstance(args, dict):
+        return False, f"'{name}' icin argumanlar bir JSON nesnesi olmali, {type(args).__name__} geldi"
+    params = schema.get("parameters", {})
+    props = params.get("properties", {})
+    for required_field in params.get("required", []):
+        if required_field not in args:
+            return False, f"'{name}' icin zorunlu alan eksik: '{required_field}'"
+    for field_name, value in args.items():
+        field_schema = props.get(field_name, {})
+        expected_type = field_schema.get("type")
+        checker = _JSON_TYPE_CHECKS.get(expected_type)
+        if checker is not None and not checker(value):
+            return False, f"'{name}.{field_name}' tipi '{expected_type}' olmali, gelen deger: {value!r}"
+        allowed_values = field_schema.get("enum")
+        if allowed_values is not None and value not in allowed_values:
+            return False, f"'{name}.{field_name}' su degerlerden biri olmali: {allowed_values}, gelen: {value!r}"
+    return True, None
 
 
 class TouchpadOverlay(tk.Toplevel):
@@ -1003,6 +1062,10 @@ class JarvisApp(tk.Tk):
 
     # ---------- Tool execution ----------
     def _execute_tool(self, name, args):
+        valid, err = validate_tool_call(name, args)
+        if not valid:
+            self._log_tool(f"REDDEDILDI ({name}): {err}")
+            return {"ok": False, "error": f"Arac cagrisi reddedildi (schema): {err}"}
         try:
             if name in CONFIRM_REQUIRED:
                 desc = {
@@ -1130,7 +1193,10 @@ class JarvisApp(tk.Tk):
             if name == "ocr_screen":
                 try:
                     import pytesseract
-                    text = pytesseract.image_to_string(pyautogui.screenshot(), lang="tur+eng")
+                    user_tessdata = Path.home() / ".omniai" / "tessdata"
+                    config = f'--tessdata-dir "{user_tessdata}"' if user_tessdata.exists() else ""
+                    text = pytesseract.image_to_string(pyautogui.screenshot(), lang="tur+eng", config=config)
+                    self._log_tool(f"ocr_screen -> {len(text)} karakter okundu")
                     return {"ok": True, "text": text}
                 except Exception as e:
                     return {"ok": False, "error": f"OCR kullanilamiyor: {e}"}
