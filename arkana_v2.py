@@ -487,7 +487,7 @@ class JarvisApp(tk.Tk):
             self._log_system(f"NOT: son kapanistan kalan yarim bir gorev var ('{last.goal[:80]}', son adim: "
                               f"'{last_tool}'). Otomatik devam etmiyorum - isterseniz ayni istegi tekrar yazin.")
         import atexit
-        atexit.register(self._mark_current_task_interrupted)
+        atexit.register(self._safe_shutdown)
         # Uygulama acilir acilmaz ekrani otomatik izlemeye basla
         self._toggle_live()
         # Baslangicta kompakt (sadece chat) gorunumde ac
@@ -1068,12 +1068,18 @@ class JarvisApp(tk.Tk):
             return {"ok": False, "error": str(e)}
 
     # ---------- Gorev durum makinesi (checkpoint/resume) ----------
-    def _mark_current_task_interrupted(self):
+    def _safe_shutdown(self):
         """Registered with atexit: covers a normal interpreter shutdown (closing the
-        console, Ctrl+C) mid-task. Does NOT cover a hard kill from Task Manager --
-        no Python code runs in that case, by design of how process termination works."""
+        console, Ctrl+C) -- NOT a hard kill from Task Manager, where no Python code
+        runs at all. Marks any in-flight task resumable, and closes the Playwright
+        browser (its own OS process -- left running orphaned otherwise)."""
         if self._current_task_id:
             self._task_store.mark_interrupted(self._current_task_id)
+        try:
+            import browser_control
+            browser_control.close()
+        except Exception:
+            pass
 
     def _task_transition(self, to_state):
         """Best-effort state transition: a mapping mismatch here must never crash
