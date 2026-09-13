@@ -31,7 +31,7 @@ import pyperclip
 import requests
 
 from error_log import log_error
-from provider_gateway import PROVIDER_BREAKER
+from provider_gateway import PROVIDER_BREAKER, PROVIDER_METRICS, call_with_retry
 from task_state import InvalidTransitionError, TaskState, TaskStore
 from PIL import Image, ImageTk
 
@@ -901,15 +901,18 @@ class JarvisApp(tk.Tk):
             for p in providers:
                 if not PROVIDER_BREAKER.allow(p["name"]):
                     continue
+                started = time.time()
                 try:
                     candidate = OpenAI(api_key=p["api_key"], base_url=p["base_url"])
-                    resp = candidate.chat.completions.create(model=p["model"], messages=messages,
-                                                              tools=TOOL_SCHEMAS, max_tokens=800)
+                    resp = call_with_retry(lambda: candidate.chat.completions.create(
+                        model=p["model"], messages=messages, tools=TOOL_SCHEMAS, max_tokens=800))
                     client, model = candidate, p["model"]
                     PROVIDER_BREAKER.record_success(p["name"])
+                    PROVIDER_METRICS.record(p["name"], time.time() - started, True)
                     break
                 except Exception as e:
                     PROVIDER_BREAKER.record_failure(p["name"])
+                    PROVIDER_METRICS.record(p["name"], time.time() - started, False)
                     log_error("provider_failure", {"provider": p["name"], "error": str(e), "context": "subagent"})
                     continue
             if client is None:
@@ -1527,12 +1530,16 @@ class JarvisApp(tk.Tk):
             return False
 
         client = anthropic.Anthropic(api_key=provider["api_key"])
+        started = time.time()
         try:
-            resp = client.messages.create(model=provider["model"], max_tokens=800, system=system_prompt,
-                                           messages=messages, tools=ANTHROPIC_TOOLS)
+            resp = call_with_retry(lambda: client.messages.create(
+                model=provider["model"], max_tokens=800, system=system_prompt,
+                messages=messages, tools=ANTHROPIC_TOOLS))
             PROVIDER_BREAKER.record_success("anthropic")
+            PROVIDER_METRICS.record("anthropic", time.time() - started, True)
         except Exception as e:
             PROVIDER_BREAKER.record_failure("anthropic")
+            PROVIDER_METRICS.record("anthropic", time.time() - started, False)
             log_error("provider_failure", {"provider": "anthropic", "error": str(e), "context": "agent_loop"})
             self._log_system(f"anthropic kullanilamadi ({e}), siradaki saglayiciya geciliyor...")
             return False
@@ -1606,16 +1613,18 @@ class JarvisApp(tk.Tk):
                 self._log_system(f"{p['name']} gecici olarak devre disi (art arda hata), siradaki saglayiciya "
                                   f"geciliyor...")
                 continue
+            started = time.time()
             try:
                 candidate = OpenAI(api_key=p["api_key"], base_url=p["base_url"])
-                resp = candidate.chat.completions.create(
-                    model=p["model"], messages=messages, tools=TOOL_SCHEMAS, max_tokens=800,
-                )
+                resp = call_with_retry(lambda: candidate.chat.completions.create(
+                    model=p["model"], messages=messages, tools=TOOL_SCHEMAS, max_tokens=800))
                 client, model, active_name = candidate, p["model"], p["name"]
                 PROVIDER_BREAKER.record_success(p["name"])
+                PROVIDER_METRICS.record(p["name"], time.time() - started, True)
                 break
             except Exception as e:
                 PROVIDER_BREAKER.record_failure(p["name"])
+                PROVIDER_METRICS.record(p["name"], time.time() - started, False)
                 log_error("provider_failure", {"provider": p["name"], "error": str(e), "context": "agent_loop"})
                 last_error = e
                 self._log_system(f"{p['name']} kullanilamadi ({e}), siradaki saglayiciya geciliyor...")

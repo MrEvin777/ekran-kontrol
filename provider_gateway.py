@@ -55,11 +55,59 @@ class ProviderCircuitBreaker:
             self._opened_at[provider_name] = time.monotonic()
 
     def status(self) -> dict[str, str]:
-        """For a future 'Saglayici Durumu' panel: current state per provider."""
+        """For the 'Saglayici Durumu' panel: current state per provider."""
         return {name: state.value for name, state in self._state.items()}
 
 
-# One shared breaker for the whole app's lifetime (module-level singleton --
-# arkana_v2.py is itself a single-process, single-instance Tkinter app, so this
-# matches its existing pattern of module-level state like CONFIG_DIR).
+class PerformanceMetrics:
+    """Rolling per-provider call stats -- latency and success rate, kept in
+    memory for the app's lifetime. Not persisted: this is a live-status view,
+    not a billing/audit record (error_log.py already covers the audit trail)."""
+
+    def __init__(self, window: int = 20) -> None:
+        self.window = window
+        self._latencies: dict[str, list[float]] = {}
+        self._outcomes: dict[str, list[bool]] = {}
+
+    def record(self, provider_name: str, latency_s: float, success: bool) -> None:
+        lat = self._latencies.setdefault(provider_name, [])
+        out = self._outcomes.setdefault(provider_name, [])
+        lat.append(latency_s)
+        out.append(success)
+        del lat[: -self.window]
+        del out[: -self.window]
+
+    def summary(self) -> dict[str, dict]:
+        result = {}
+        for name, outcomes in self._outcomes.items():
+            latencies = self._latencies.get(name, [])
+            result[name] = {
+                "calls": len(outcomes),
+                "success_rate": round(sum(outcomes) / len(outcomes), 2) if outcomes else None,
+                "avg_latency_s": round(sum(latencies) / len(latencies), 2) if latencies else None,
+            }
+        return result
+
+
+def call_with_retry(fn, max_attempts: int = 2, base_delay_s: float = 0.4):
+    """Retries the SAME provider a couple of times with exponential backoff
+    before giving up on it -- for a transient blip (one dropped connection),
+    not for a provider that is actually down (the circuit breaker handles that
+    one level up, across providers). Re-raises the last exception if every
+    attempt fails, so the caller's own except/record_failure still fires."""
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if attempt < max_attempts - 1:
+                time.sleep(base_delay_s * (2**attempt))
+    raise last_exc
+
+
+# One shared breaker/metrics tracker for the whole app's lifetime (module-level
+# singleton -- arkana_v2.py is itself a single-process, single-instance Tkinter
+# app, so this matches its existing pattern of module-level state like CONFIG_DIR).
 PROVIDER_BREAKER = ProviderCircuitBreaker()
+PROVIDER_METRICS = PerformanceMetrics()

@@ -4,7 +4,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from provider_gateway import CircuitState, ProviderCircuitBreaker  # noqa: E402
+import pytest  # noqa: E402
+
+from provider_gateway import (  # noqa: E402
+    CircuitState,
+    PerformanceMetrics,
+    ProviderCircuitBreaker,
+    call_with_retry,
+)
 
 
 def test_allows_calls_when_closed():
@@ -54,3 +61,57 @@ def test_providers_are_independent():
     b.record_failure("groq")
     assert not b.allow("groq")
     assert b.allow("cerebras")  # a different provider's breaker is untouched
+
+
+def test_call_with_retry_succeeds_on_second_attempt():
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise ConnectionError("blip")
+        return "ok"
+
+    result = call_with_retry(flaky, max_attempts=3, base_delay_s=0.01)
+    assert result == "ok"
+    assert calls["n"] == 2
+
+
+def test_call_with_retry_raises_after_exhausting_attempts():
+    def always_fails():
+        raise TimeoutError("dead")
+
+    with pytest.raises(TimeoutError):
+        call_with_retry(always_fails, max_attempts=2, base_delay_s=0.01)
+
+
+def test_call_with_retry_does_not_retry_a_call_that_succeeds_first_try():
+    calls = {"n": 0}
+
+    def works():
+        calls["n"] += 1
+        return "ok"
+
+    call_with_retry(works, max_attempts=5, base_delay_s=0.01)
+    assert calls["n"] == 1
+
+
+def test_performance_metrics_summary():
+    m = PerformanceMetrics(window=10)
+    m.record("groq", 0.5, True)
+    m.record("groq", 1.5, True)
+    m.record("groq", 2.0, False)
+    summary = m.summary()
+    assert summary["groq"]["calls"] == 3
+    assert summary["groq"]["success_rate"] == round(2 / 3, 2)
+    assert summary["groq"]["avg_latency_s"] == round((0.5 + 1.5 + 2.0) / 3, 2)
+
+
+def test_performance_metrics_rolling_window_drops_oldest():
+    m = PerformanceMetrics(window=2)
+    m.record("groq", 1.0, True)
+    m.record("groq", 2.0, True)
+    m.record("groq", 3.0, False)  # window=2 -> the first record (1.0) is dropped
+    summary = m.summary()
+    assert summary["groq"]["calls"] == 2
+    assert summary["groq"]["avg_latency_s"] == 2.5
