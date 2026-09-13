@@ -136,8 +136,24 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "git_push", "description": "Commit'leri uzak sunucuya gonderir (HER "
         "ZAMAN onay ister).",
         "parameters": {"type": "object", "properties": {"repo_path": {"type": "string"}}, "required": ["repo_path"]}}},
-    {"type": "function", "function": {"name": "open_url", "description": "Tarayicida bir adres acar.",
+    {"type": "function", "function": {"name": "open_url", "description": "Varsayilan tarayicida bir adres acar "
+        "(salt izleme - sayfayla etkilesim kuramaz). Sayfada tiklama/okuma/yazma gerekiyorsa 'browser_navigate' "
+        "kullan.", "parameters": {"type": "object", "properties": {"url": {"type": "string"}},
+        "required": ["url"]}}},
+    {"type": "function", "function": {"name": "browser_navigate", "description": "Jarvis'in kendi kontrol "
+        "ettigi bir tarayici penceresinde bir adrese gider (goruntulenebilir, kullanicinin normal Chrome/Edge "
+        "oturumundan ayri). Sayfayla etkilesim kurmadan once bunu cagir.",
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
+    {"type": "function", "function": {"name": "browser_read_page", "description": "Su an acik olan Jarvis "
+        "tarayici sayfasinin gorunur metnini okur.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "browser_click", "description": "Jarvis tarayicisinda, verilen "
+        "metni tasiyan (buton/link/herhangi bir eleman) ilk gorunur ogeye tiklar.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string",
+        "description": "Tiklanacak elemanin uzerindeki/etiketindeki metin"}}, "required": ["text"]}}},
+    {"type": "function", "function": {"name": "browser_type", "description": "Jarvis tarayicisinda, etiketi "
+        "veya placeholder'i verilen metni tasiyan giris alanina yazi yazar.",
+        "parameters": {"type": "object", "properties": {"label_or_placeholder": {"type": "string"},
+        "text": {"type": "string"}}, "required": ["label_or_placeholder", "text"]}}},
     {"type": "function", "function": {"name": "open_app", "description": "Bir programi acar (orn: notepad, calc).",
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
     {"type": "function", "function": {"name": "get_clipboard", "description": "Pano icerigini okur.",
@@ -1246,6 +1262,30 @@ class JarvisApp(tk.Tk):
                 webbrowser.open(args["url"])
                 self._log_tool(f"open_url -> {args['url']}")
                 return {"ok": True}
+
+            if name == "browser_navigate":
+                import browser_control
+                result = browser_control.navigate(args["url"])
+                self._log_tool(f"browser_navigate -> {args['url']}")
+                return result
+
+            if name == "browser_read_page":
+                import browser_control
+                result = browser_control.get_page_text()
+                self._log_tool(f"browser_read_page -> {len(result.get('text', ''))} karakter")
+                return result
+
+            if name == "browser_click":
+                import browser_control
+                result = browser_control.click_by_text(args["text"])
+                self._log_tool(f"browser_click -> '{args['text']}' ({'basarili' if result.get('ok') else 'hata'})")
+                return result
+
+            if name == "browser_type":
+                import browser_control
+                result = browser_control.type_into(args["label_or_placeholder"], args["text"])
+                self._log_tool(f"browser_type -> '{args['label_or_placeholder']}'")
+                return result
 
             if name == "open_app":
                 os.startfile(args["name"])

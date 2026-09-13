@@ -76,3 +76,20 @@ def test_click_element_valid_call_passes():
 def test_list_open_windows_takes_no_arguments():
     ok, err = validate_tool_call("list_open_windows", {})
     assert ok is True
+
+
+def test_browser_navigate_requires_url():
+    ok, err = validate_tool_call("browser_navigate", {})
+    assert ok is False
+    assert "url" in err
+
+
+def test_browser_click_requires_text():
+    ok, err = validate_tool_call("browser_click", {})
+    assert ok is False
+
+
+def test_browser_type_requires_both_fields():
+    ok, err = validate_tool_call("browser_type", {"label_or_placeholder": "Adiniz"})
+    assert ok is False
+    assert "text" in err

@@ -22,3 +22,7 @@ pywin32
 # (winget install UB-Mannheim.TesseractOCR). Turkce dil paketi (tur.traineddata)
 # ~/.omniai/tessdata/ altina ayrica konmali -- README'de belgelenmeli.
 pytesseract==0.3.10
+
+# Tarayici kontrolu (browser_control.py): DOM/rol-tabanli etkilesim.
+# Kurulumdan sonra ayrica: python -m playwright install chromium
+playwright==1.62.0
