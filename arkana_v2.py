@@ -31,6 +31,7 @@ import pyperclip
 import requests
 
 from provider_gateway import PROVIDER_BREAKER
+from task_state import InvalidTransitionError, TaskState, TaskStore
 from PIL import Image, ImageTk
 
 try:
@@ -451,6 +452,8 @@ class JarvisApp(tk.Tk):
         self._qdrant_client = None
         self._undo_stack = []
         self._subagent_depth = 0
+        self._task_store = TaskStore(CONFIG_DIR / "tasks.json")
+        self._current_task_id = None
 
         self._build_ui()
         self._refresh_status()
@@ -461,6 +464,14 @@ class JarvisApp(tk.Tk):
         self._log_system("Arkana Yaslan hazir. Ekranda gezdirebileceginiz yuvarlak dugmeyi kullanarak "
                           "beni her yerden acabilirsiniz. Sohbet kutusuna ne yapmami istediginizi yazin "
                           "veya mikrofon butonuna basip konusun.")
+        resumable = self._task_store.list_resumable()
+        if resumable:
+            last = resumable[-1]
+            last_tool = last.checkpoint.get("last_tool", "?")
+            self._log_system(f"NOT: son kapanistan kalan yarim bir gorev var ('{last.goal[:80]}', son adim: "
+                              f"'{last_tool}'). Otomatik devam etmiyorum - isterseniz ayni istegi tekrar yazin.")
+        import atexit
+        atexit.register(self._mark_current_task_interrupted)
         # Uygulama acilir acilmaz ekrani otomatik izlemeye basla
         self._toggle_live()
         # Baslangicta kompakt (sadece chat) gorunumde ac
@@ -954,6 +965,33 @@ class JarvisApp(tk.Tk):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    # ---------- Gorev durum makinesi (checkpoint/resume) ----------
+    def _mark_current_task_interrupted(self):
+        """Registered with atexit: covers a normal interpreter shutdown (closing the
+        console, Ctrl+C) mid-task. Does NOT cover a hard kill from Task Manager --
+        no Python code runs in that case, by design of how process termination works."""
+        if self._current_task_id:
+            self._task_store.mark_interrupted(self._current_task_id)
+
+    def _task_transition(self, to_state):
+        """Best-effort state transition: a mapping mismatch here must never crash
+        the actual chat turn, so any error is swallowed (this is an observability/
+        resume feature layered on top of the working chat flow, not a gate on it)."""
+        if not self._current_task_id:
+            return
+        try:
+            self._task_store.transition(self._current_task_id, to_state)
+        except (InvalidTransitionError, KeyError):
+            pass
+
+    def _task_checkpoint(self, data):
+        if not self._current_task_id:
+            return
+        try:
+            self._task_store.checkpoint(self._current_task_id, data)
+        except KeyError:
+            pass
+
     # ---------- Gorev devamliligi ----------
     CHAT_HISTORY_FILE = CONFIG_DIR / "chat_history.json"
 
@@ -1087,6 +1125,17 @@ class JarvisApp(tk.Tk):
         if not valid:
             self._log_tool(f"REDDEDILDI ({name}): {err}")
             return {"ok": False, "error": f"Arac cagrisi reddedildi (schema): {err}"}
+        needs_confirmation = name in CONFIRM_REQUIRED
+        if needs_confirmation:
+            self._task_transition(TaskState.WAITING_FOR_PERMISSION)
+        result = self._execute_tool_inner(name, args)
+        if needs_confirmation:
+            self._task_transition(TaskState.EXECUTING)  # back, whether approved or denied
+        self._task_checkpoint({"last_tool": name, "last_ok": result.get("ok") if isinstance(result, dict) else None,
+                                "ts": time.time()})
+        return result
+
+    def _execute_tool_inner(self, name, args):
         try:
             if name in CONFIRM_REQUIRED:
                 desc = {
@@ -1366,17 +1415,23 @@ class JarvisApp(tk.Tk):
         self.chat_entry.delete(0, "end")
         self._append_chat("Siz", text, "user")
 
+        task = self._task_store.create(text)
+        self._current_task_id = task.id
+        self._task_transition(TaskState.ANALYZING)
+
         tier = classify_task(text)
         providers = self._available_providers(tier)
         if not any(self.config_data.get(PROVIDER_INFO[p["name"]]["key_field"]) for p in providers
                    if p["name"] != "ollama") and not self._ping("http://localhost:11434/api/tags"):
             self._append_chat("Arkana Yaslan", "Once 'Ayarlar' butonundan en az bir API anahtari girin "
                                                 "(veya Ollama'nin calistigindan emin olun).", "assistant")
+            self._task_transition(TaskState.FAILED)
             return
 
         if not self.last_image_b64:
             self._capture_screen()
 
+        self._task_transition(TaskState.EXECUTING)
         self._log_system(f"(model router: '{tier}' -> {providers[0]['name']}/{providers[0]['model']})")
         self.send_btn.state(["disabled"])
         threading.Thread(target=self._agent_loop, args=(text, tier), daemon=True).start()
@@ -1434,6 +1489,8 @@ class JarvisApp(tk.Tk):
                     self.chat_history.append({"role": "user", "content": user_text})
                     self.chat_history.append({"role": "assistant", "content": text})
                     self._save_chat_history()
+                    self._task_transition(TaskState.VERIFYING)
+                    self._task_transition(TaskState.COMPLETED)
                     self.after(0, lambda: self._append_chat("Arkana Yaslan", text, "assistant"))
                     self._speak(text)
                     return True
@@ -1449,10 +1506,12 @@ class JarvisApp(tk.Tk):
                 resp = client.messages.create(model=provider["model"], max_tokens=800, system=system_prompt,
                                                messages=messages, tools=ANTHROPIC_TOOLS)
 
+            self._task_transition(TaskState.FAILED)
             self.after(0, lambda: self._append_chat("Arkana Yaslan", "Cok fazla arac adimi oldu, durduruyorum.",
                                                       "assistant"))
             return True
         except Exception as e:
+            self._task_transition(TaskState.FAILED)
             self.after(0, lambda: self._append_chat("Arkana Yaslan", f"Hata olustu: {e}", "assistant"))
             return True
 
@@ -1461,6 +1520,7 @@ class JarvisApp(tk.Tk):
 
         providers = self._available_providers(tier)
         if not providers:
+            self._task_transition(TaskState.FAILED)
             self.after(0, lambda: self._append_chat(
                 "Arkana Yaslan", "Hicbir API anahtari girilmemis.", "assistant"))
             self.after(0, lambda: self.send_btn.state(["!disabled"]))
@@ -1504,6 +1564,7 @@ class JarvisApp(tk.Tk):
                 continue
 
         if client is None:
+            self._task_transition(TaskState.FAILED)
             self.after(0, lambda: self._append_chat(
                 "Arkana Yaslan", f"Hicbir saglayiciya ulasilamadi. Son hata: {last_error}", "assistant"))
             self.after(0, lambda: self.send_btn.state(["!disabled"]))
@@ -1520,6 +1581,8 @@ class JarvisApp(tk.Tk):
                     self.chat_history.append({"role": "user", "content": user_text})
                     self.chat_history.append({"role": "assistant", "content": answer})
                     self._save_chat_history()
+                    self._task_transition(TaskState.VERIFYING)
+                    self._task_transition(TaskState.COMPLETED)
                     self.after(0, lambda: self._append_chat("Arkana Yaslan", answer, "assistant"))
                     self._speak(answer)
                     return
@@ -1536,9 +1599,11 @@ class JarvisApp(tk.Tk):
                 resp = client.chat.completions.create(model=model, messages=messages, tools=TOOL_SCHEMAS,
                                                        max_tokens=800)
 
+            self._task_transition(TaskState.FAILED)
             self.after(0, lambda: self._append_chat("Arkana Yaslan", "Cok fazla arac adimi oldu, durduruyorum.",
                                                       "assistant"))
         except Exception as e:
+            self._task_transition(TaskState.FAILED)
             self.after(0, lambda: self._append_chat("Arkana Yaslan", f"Hata olustu: {e}", "assistant"))
         finally:
             self.after(0, lambda: self.send_btn.state(["!disabled"]))
