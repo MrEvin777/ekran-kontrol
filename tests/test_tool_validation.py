@@ -54,3 +54,25 @@ def test_delegate_to_agent_rejects_a_role_outside_the_enum():
 def test_delegate_to_agent_accepts_a_valid_role():
     ok, err = validate_tool_call("delegate_to_agent", {"role": "kodlayici", "task": "x"})
     assert ok is True
+
+
+def test_get_ui_elements_requires_window_id():
+    ok, err = validate_tool_call("get_ui_elements", {})
+    assert ok is False
+    assert "window_id" in err
+
+
+def test_click_element_requires_both_fields():
+    ok, err = validate_tool_call("click_element", {"window_id": 123})
+    assert ok is False
+    assert "name_contains" in err
+
+
+def test_click_element_valid_call_passes():
+    ok, err = validate_tool_call("click_element", {"window_id": 123, "name_contains": "Kaydet"})
+    assert ok is True
+
+
+def test_list_open_windows_takes_no_arguments():
+    ok, err = validate_tool_call("list_open_windows", {})
+    assert ok is True

@@ -29,6 +29,8 @@ from tkinter import messagebox, scrolledtext, simpledialog, ttk
 import pyautogui
 import pyperclip
 import requests
+
+from provider_gateway import PROVIDER_BREAKER
 from PIL import Image, ImageTk
 
 try:
@@ -155,6 +157,21 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
     {"type": "function", "function": {"name": "get_active_window", "description": "Kullanicinin su an hangi "
         "programda/pencerede oldugunu soyler.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "list_open_windows", "description": "Su an acik olan tum "
+        "pencerelerin listesini dondurur (baslik, pencere kimligi). Once bunu cagirip hangi pencereyle "
+        "calisacagini sec.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "get_ui_elements", "description": "Bir penceredeki tiklanabilir/"
+        "yazilabilir elemanlari (buton, metin kutusu, menu...) rol/ad/ID olarak listeler. Koordinat tahmin "
+        "etmek yerine ONCE bunu kullan; bir eleman bulursan 'click_element' ile ona rol+ad ile tikla.",
+        "parameters": {"type": "object", "properties": {"window_id": {"type": "integer",
+        "description": "list_open_windows veya get_active_window'dan gelen pencere kimligi (hwnd)"}},
+        "required": ["window_id"]}}},
+    {"type": "function", "function": {"name": "click_element", "description": "Bir penceredeki, adinda gecen "
+        "metne gore bulunan elemanin TAM ORTASINA tiklar (koordinat tahmini degil, gercek UI Automation "
+        "konumu). Bulunamazsa hata doner; o zaman ekran goruntusune bakip koordinatla 'click' kullan.",
+        "parameters": {"type": "object", "properties": {"window_id": {"type": "integer"},
+        "name_contains": {"type": "string", "description": "Elemanin adinda gecmesi beklenen metin, orn: "
+        "'Kaydet' veya 'Save'"}}, "required": ["window_id", "name_contains"]}}},
     {"type": "function", "function": {"name": "memory_save", "description": "Onemli bir bilgiyi, tercihi veya "
         "karari kalici hafizaya kaydeder (kullanici bilgisayari kapatsa bile hatirlanir).",
         "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "tag": {"type": "string",
@@ -849,13 +866,17 @@ class JarvisApp(tk.Tk):
             client, model = None, None
             resp = None
             for p in providers:
+                if not PROVIDER_BREAKER.allow(p["name"]):
+                    continue
                 try:
                     candidate = OpenAI(api_key=p["api_key"], base_url=p["base_url"])
                     resp = candidate.chat.completions.create(model=p["model"], messages=messages,
                                                               tools=TOOL_SCHEMAS, max_tokens=800)
                     client, model = candidate, p["model"]
+                    PROVIDER_BREAKER.record_success(p["name"])
                     break
                 except Exception:
+                    PROVIDER_BREAKER.record_failure(p["name"])
                     continue
             if client is None:
                 return {"ok": False, "error": "Alt-ajan icin hicbir saglayiciya ulasilamadi."}
@@ -1248,6 +1269,35 @@ class JarvisApp(tk.Tk):
                 title = self._get_active_window_title()
                 return {"ok": True, "active_window": title or "(bilinmiyor)"}
 
+            if name == "list_open_windows":
+                import ui_automation
+                wins = ui_automation.list_windows()
+                self._log_tool(f"list_open_windows -> {len(wins)} pencere")
+                return {"ok": True, "windows": [{"window_id": w.hwnd, "title": w.title} for w in wins]}
+
+            if name == "get_ui_elements":
+                import ui_automation
+                try:
+                    elements = ui_automation.get_ui_elements(args["window_id"])
+                except Exception as e:
+                    return {"ok": False, "error": f"UI Automation okunamadi: {e}"}
+                self._log_tool(f"get_ui_elements -> pencere {args['window_id']}, {len(elements)} eleman")
+                return {"ok": True, "elements": [
+                    {"control_type": el.control_type, "name": el.name, "automation_id": el.automation_id,
+                     "rect": el.rect} for el in elements if el.name]}
+
+            if name == "click_element":
+                import ui_automation
+                el = ui_automation.find_element_by_name(args["window_id"], args["name_contains"])
+                if el is None or el.rect is None:
+                    return {"ok": False, "error": f"'{args['name_contains']}' iceren tiklanabilir eleman "
+                                                    f"bulunamadi (koordinatla 'click' dene)."}
+                cx = (el.rect[0] + el.rect[2]) // 2
+                cy = (el.rect[1] + el.rect[3]) // 2
+                pyautogui.click(cx, cy)
+                self._log_tool(f"click_element -> '{el.name}' ({el.control_type}) @ ({cx},{cy})")
+                return {"ok": True, "clicked": el.name, "control_type": el.control_type, "x": cx, "y": cy}
+
             if name == "memory_save":
                 self._memory_save(args["text"], args.get("tag", ""))
                 self._log_tool(f"memory_save -> {args['text'][:60]}")
@@ -1361,11 +1411,17 @@ class JarvisApp(tk.Tk):
         messages = list(self.chat_history[-10:])
         messages.append({"role": "user", "content": content})
 
+        if not PROVIDER_BREAKER.allow("anthropic"):
+            self._log_system("anthropic gecici olarak devre disi (art arda hata), siradaki saglayiciya geciliyor...")
+            return False
+
         client = anthropic.Anthropic(api_key=provider["api_key"])
         try:
             resp = client.messages.create(model=provider["model"], max_tokens=800, system=system_prompt,
                                            messages=messages, tools=ANTHROPIC_TOOLS)
+            PROVIDER_BREAKER.record_success("anthropic")
         except Exception as e:
+            PROVIDER_BREAKER.record_failure("anthropic")
             self._log_system(f"anthropic kullanilamadi ({e}), siradaki saglayiciya geciliyor...")
             return False
 
@@ -1423,20 +1479,26 @@ class JarvisApp(tk.Tk):
         client, model, active_name, resp = None, None, None, None
         last_error = None
         for p in providers:
+            if p["kind"] == "anthropic":
+                handled = self._run_anthropic(p, user_text, active_window)  # does its own breaker check
+                if handled:
+                    self.after(0, lambda: self.send_btn.state(["!disabled"]))
+                    return
+                continue
+            if not PROVIDER_BREAKER.allow(p["name"]):
+                self._log_system(f"{p['name']} gecici olarak devre disi (art arda hata), siradaki saglayiciya "
+                                  f"geciliyor...")
+                continue
             try:
-                if p["kind"] == "anthropic":
-                    handled = self._run_anthropic(p, user_text, active_window)
-                    if handled:
-                        self.after(0, lambda: self.send_btn.state(["!disabled"]))
-                        return
-                    continue
                 candidate = OpenAI(api_key=p["api_key"], base_url=p["base_url"])
                 resp = candidate.chat.completions.create(
                     model=p["model"], messages=messages, tools=TOOL_SCHEMAS, max_tokens=800,
                 )
                 client, model, active_name = candidate, p["model"], p["name"]
+                PROVIDER_BREAKER.record_success(p["name"])
                 break
             except Exception as e:
+                PROVIDER_BREAKER.record_failure(p["name"])
                 last_error = e
                 self._log_system(f"{p['name']} kullanilamadi ({e}), siradaki saglayiciya geciliyor...")
                 continue
