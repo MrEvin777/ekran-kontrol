@@ -28,3 +28,21 @@ def test_app_starts_and_closes_without_crashing():
         if app.live_watching:
             app._toggle_live()  # stop the background screen-capture thread before destroy
         app.destroy()
+
+
+def test_provider_status_and_setup_check_panels_open_without_crashing():
+    try:
+        app = arkana_v2.JarvisApp()
+    except Exception as e:
+        pytest.skip(f"no display available to open a Tk window here ({e})")
+        return
+    try:
+        app.update()
+        app._open_provider_status()  # must not raise even with zero recorded calls yet
+        app.update()
+        app._open_setup_check()
+        app.update()
+    finally:
+        if app.live_watching:
+            app._toggle_live()
+        app.destroy()

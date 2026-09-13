@@ -30,6 +30,7 @@ import pyautogui
 import pyperclip
 import requests
 
+import error_log
 from error_log import log_error
 from provider_gateway import PROVIDER_BREAKER, PROVIDER_METRICS, call_with_retry
 from task_state import InvalidTransitionError, TaskState, TaskStore
@@ -523,6 +524,8 @@ class JarvisApp(tk.Tk):
         ttk.Button(btns, text="Ayarlar", command=self._open_settings).pack(side="right")
         ttk.Button(btns, text="Baglantilari Test Et", command=self._test_connections_async).pack(side="right",
                                                                                                     padx=6)
+        ttk.Button(btns, text="Saglayici Durumu", command=self._open_provider_status).pack(side="right", padx=6)
+        ttk.Button(btns, text="Kurulum Kontrolu", command=self._open_setup_check).pack(side="right", padx=6)
 
         self.body = ttk.Panedwindow(self, orient="horizontal")
         self.body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -775,6 +778,86 @@ class JarvisApp(tk.Tk):
                            command=lambda pid=p.id: (self._memory_delete(pid), refresh())).pack(side="right")
 
         refresh()
+
+    # ---------- Saglayici Durumu ----------
+    def _open_provider_status(self):
+        win = tk.Toplevel(self)
+        win.title("Saglayici Durumu")
+        win.geometry("620x480")
+        container = ttk.Frame(win, padding=8)
+        container.pack(fill="both", expand=True)
+
+        def refresh():
+            for w in container.winfo_children():
+                w.destroy()
+            breaker_status = PROVIDER_BREAKER.status()
+            metrics = PROVIDER_METRICS.summary()
+            all_names = sorted(set(breaker_status) | set(metrics) | set(PROVIDER_INFO))
+            header = ttk.Frame(container)
+            header.pack(fill="x")
+            for col, text in enumerate(["Saglayici", "Devre Durumu", "Cagri", "Basari", "Ort. Gecikme"]):
+                ttk.Label(header, text=text, font=("Segoe UI", 9, "bold"), width=14).grid(row=0, column=col,
+                                                                                            sticky="w")
+            body = ttk.Frame(container)
+            body.pack(fill="both", expand=True, pady=(4, 8))
+            for i, name in enumerate(all_names):
+                circuit = breaker_status.get(name, "closed")
+                m = metrics.get(name, {})
+                ttk.Label(body, text=name, width=14).grid(row=i, column=0, sticky="w")
+                ttk.Label(body, text=circuit, width=14).grid(row=i, column=1, sticky="w")
+                ttk.Label(body, text=str(m.get("calls", "-")), width=14).grid(row=i, column=2, sticky="w")
+                sr = m.get("success_rate")
+                ttk.Label(body, text=f"%{sr * 100:.0f}" if sr is not None else "-", width=14).grid(
+                    row=i, column=3, sticky="w")
+                lat = m.get("avg_latency_s")
+                ttk.Label(body, text=f"{lat:.2f}s" if lat is not None else "-", width=14).grid(
+                    row=i, column=4, sticky="w")
+
+            ttk.Label(container, text="Son hatalar:", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+            errors_box = scrolledtext.ScrolledText(container, height=8, state="normal")
+            errors_box.pack(fill="both", expand=True)
+            recent = [e for e in error_log.read_recent(50) if e.get("category") == "provider_failure"][-15:]
+            if not recent:
+                errors_box.insert("end", "Kayitli saglayici hatasi yok.")
+            for e in reversed(recent):
+                import datetime
+                ts = datetime.datetime.fromtimestamp(e.get("ts", 0)).strftime("%H:%M:%S")
+                errors_box.insert("end", f"[{ts}] {e.get('provider')}: {e.get('error')}\n")
+            errors_box.configure(state="disabled")
+
+        ttk.Button(win, text="Yenile", command=refresh).pack(pady=(0, 8))
+        refresh()
+
+    # ---------- Kurulum Kontrolu ----------
+    def _open_setup_check(self):
+        win = tk.Toplevel(self)
+        win.title("Kurulum Kontrolu")
+        win.geometry("560x420")
+        box = scrolledtext.ScrolledText(win, wrap="word", state="disabled")
+        box.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def set_text(text):
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            box.insert("end", text)
+            box.configure(state="disabled")
+
+        set_text("Kontrol ediliyor...")
+
+        def run():
+            import setup_check
+            results = setup_check.run_all()
+            lines = []
+            for r in results:
+                mark = "[OK]" if r["ok"] else "[HATA]"
+                lines.append(f"{mark} {r['name']}: {r['detail']}")
+            failed = sum(1 for r in results if not r["ok"])
+            lines.append("")
+            lines.append(f"Tamamlandi. {len(results) - failed}/{len(results)} kontrol basarili." if failed == 0
+                          else f"Tamamlandi. {failed} kontrol basarisiz - yukarida 'HATA' isaretli satirlara bakin.")
+            self.after(0, lambda: set_text("\n".join(lines)))
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ---------- Voice: mic (STT) ----------
     def _toggle_recording(self):
