@@ -25,4 +25,6 @@ def test_app_starts_and_closes_without_crashing():
         assert app._task_store.path.exists()
         assert app._current_task_id is None  # no chat sent yet
     finally:
+        if app.live_watching:
+            app._toggle_live()  # stop the background screen-capture thread before destroy
         app.destroy()

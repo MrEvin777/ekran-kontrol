@@ -52,14 +52,7 @@ except Exception:
     sd = None
     sf = None
 
-# pytesseract 0.3.10/0.3.13 both do `from pkgutil import find_loader`, removed in
-# Python 3.13+. Shim it back so `import pytesseract` (in ocr_screen) doesn't crash.
-import pkgutil as _pkgutil
-
-if not hasattr(_pkgutil, "find_loader"):
-    import importlib.util as _importlib_util
-
-    _pkgutil.find_loader = lambda name: _importlib_util.find_spec(name)
+import compat  # noqa: F401  (Python 3.13+ shims -- must run before pytesseract is imported anywhere)
 
 # Point pytesseract at the real tesseract.exe -- winget installs it but does not
 # add it to PATH, so a bare `pytesseract.image_to_string()` fails without this.
