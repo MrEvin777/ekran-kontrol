@@ -93,3 +93,18 @@ def test_browser_type_requires_both_fields():
     ok, err = validate_tool_call("browser_type", {"label_or_placeholder": "Adiniz"})
     assert ok is False
     assert "text" in err
+
+
+def test_git_diff_requires_repo_path():
+    ok, err = validate_tool_call("git_diff", {})
+    assert ok is False
+
+
+def test_git_diff_optional_staged_flag_accepts_valid_call():
+    ok, err = validate_tool_call("git_diff", {"repo_path": "C:\\x", "staged": True})
+    assert ok is True
+
+
+def test_git_diff_rejects_wrong_type_for_staged():
+    ok, err = validate_tool_call("git_diff", {"repo_path": "C:\\x", "staged": "yes"})
+    assert ok is False

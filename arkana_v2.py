@@ -30,6 +30,7 @@ import pyautogui
 import pyperclip
 import requests
 
+from error_log import log_error
 from provider_gateway import PROVIDER_BREAKER
 from task_state import InvalidTransitionError, TaskState, TaskStore
 from PIL import Image, ImageTk
@@ -129,6 +130,11 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "git_status", "description": "Bir git deposunun durumunu gosterir.",
         "parameters": {"type": "object", "properties": {"repo_path": {"type": "string"}}, "required": ["repo_path"]}}},
+    {"type": "function", "function": {"name": "git_diff", "description": "Bir git deposundaki commit edilmemis "
+        "degisiklikleri (diff) gosterir. Commit atmadan ONCE kullaniciya ne degistigini gostermek icin kullan.",
+        "parameters": {"type": "object", "properties": {"repo_path": {"type": "string"},
+        "staged": {"type": "boolean", "description": "true ise sadece staged (git add sonrasi) degisiklikler"}},
+        "required": ["repo_path"]}}},
     {"type": "function", "function": {"name": "git_commit", "description": "Degisiklikleri yerel olarak commit "
         "eder (uzak sunucuya gondermez).",
         "parameters": {"type": "object", "properties": {"repo_path": {"type": "string"}, "message": {"type": "string"}},
@@ -902,8 +908,9 @@ class JarvisApp(tk.Tk):
                     client, model = candidate, p["model"]
                     PROVIDER_BREAKER.record_success(p["name"])
                     break
-                except Exception:
+                except Exception as e:
                     PROVIDER_BREAKER.record_failure(p["name"])
+                    log_error("provider_failure", {"provider": p["name"], "error": str(e), "context": "subagent"})
                     continue
             if client is None:
                 return {"ok": False, "error": "Alt-ajan icin hicbir saglayiciya ulasilamadi."}
@@ -1140,6 +1147,7 @@ class JarvisApp(tk.Tk):
         valid, err = validate_tool_call(name, args)
         if not valid:
             self._log_tool(f"REDDEDILDI ({name}): {err}")
+            log_error("tool_validation", {"tool": name, "error": err})
             return {"ok": False, "error": f"Arac cagrisi reddedildi (schema): {err}"}
         needs_confirmation = name in CONFIRM_REQUIRED
         if needs_confirmation:
@@ -1147,8 +1155,10 @@ class JarvisApp(tk.Tk):
         result = self._execute_tool_inner(name, args)
         if needs_confirmation:
             self._task_transition(TaskState.EXECUTING)  # back, whether approved or denied
-        self._task_checkpoint({"last_tool": name, "last_ok": result.get("ok") if isinstance(result, dict) else None,
-                                "ts": time.time()})
+        ok = result.get("ok") if isinstance(result, dict) else None
+        if ok is False:
+            log_error("tool_failure", {"tool": name, "error": result.get("error"), "task_id": self._current_task_id})
+        self._task_checkpoint({"last_tool": name, "last_ok": ok, "ts": time.time()})
         return result
 
     def _execute_tool_inner(self, name, args):
@@ -1224,6 +1234,12 @@ class JarvisApp(tk.Tk):
                 proc = subprocess.run(["git", "status"], cwd=args["repo_path"], capture_output=True, text=True)
                 self._log_tool(f"git_status -> {args['repo_path']}")
                 return {"ok": True, "output": proc.stdout + proc.stderr}
+
+            if name == "git_diff":
+                cmd = ["git", "diff"] + (["--staged"] if args.get("staged") else [])
+                proc = subprocess.run(cmd, cwd=args["repo_path"], capture_output=True, text=True)
+                self._log_tool(f"git_diff -> {args['repo_path']} ({'staged' if args.get('staged') else 'unstaged'})")
+                return {"ok": proc.returncode == 0, "diff": (proc.stdout or proc.stderr)[:15000]}
 
             if name == "git_commit":
                 subprocess.run(["git", "add", "-A"], cwd=args["repo_path"], capture_output=True, text=True)
@@ -1517,6 +1533,7 @@ class JarvisApp(tk.Tk):
             PROVIDER_BREAKER.record_success("anthropic")
         except Exception as e:
             PROVIDER_BREAKER.record_failure("anthropic")
+            log_error("provider_failure", {"provider": "anthropic", "error": str(e), "context": "agent_loop"})
             self._log_system(f"anthropic kullanilamadi ({e}), siradaki saglayiciya geciliyor...")
             return False
 
@@ -1599,6 +1616,7 @@ class JarvisApp(tk.Tk):
                 break
             except Exception as e:
                 PROVIDER_BREAKER.record_failure(p["name"])
+                log_error("provider_failure", {"provider": p["name"], "error": str(e), "context": "agent_loop"})
                 last_error = e
                 self._log_system(f"{p['name']} kullanilamadi ({e}), siradaki saglayiciya geciliyor...")
                 continue
