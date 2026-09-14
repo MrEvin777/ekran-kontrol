@@ -224,9 +224,11 @@ AGENT_PERSONAS = {
 
 # MODEL ROUTER: basit sorular icin "fast_model", zor/kodlama/analiz icin "smart_model" kullanilir.
 FAST_CHAIN = ["groq", "gemini", "cerebras", "openai", "mistral", "anthropic", "nvidia_nim",
-              "openrouter", "github_models"]
+              "openrouter", "github_models", "together", "sambanova", "huggingface", "fireworks",
+              "deepinfra", "cohere", "lm_studio"]
 SMART_CHAIN = ["anthropic", "openai", "gemini", "mistral", "nvidia_nim", "groq", "cerebras",
-               "openrouter", "github_models"]
+               "openrouter", "github_models", "together", "sambanova", "huggingface", "fireworks",
+               "deepinfra", "cohere", "lm_studio"]
 PROVIDER_INFO = {
     "openai": {"key_field": "openai_api_key", "base_url": None, "kind": "openai_compat",
                "fast_model": "gpt-4o-mini", "smart_model": "gpt-4o"},
@@ -247,6 +249,31 @@ PROVIDER_INFO = {
                    "kind": "openai_compat", "fast_model": "openai/gpt-4o-mini", "smart_model": "openai/gpt-4o"},
     "github_models": {"key_field": "github_models_token", "base_url": "https://models.inference.ai.azure.com",
                        "kind": "openai_compat", "fast_model": "gpt-4o-mini", "smart_model": "gpt-4o"},
+    "together": {"key_field": "together_api_key", "base_url": "https://api.together.xyz/v1",
+                 "kind": "openai_compat", "fast_model": "meta-llama/Llama-3.2-3B-Instruct-Turbo",
+                 "smart_model": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"},
+    "sambanova": {"key_field": "sambanova_api_key", "base_url": "https://api.sambanova.ai/v1",
+                  "kind": "openai_compat", "fast_model": "Meta-Llama-3.1-8B-Instruct",
+                  "smart_model": "Meta-Llama-3.3-70B-Instruct"},
+    "huggingface": {"key_field": "huggingface_api_key", "base_url": "https://router.huggingface.co/v1",
+                    "kind": "openai_compat", "fast_model": "meta-llama/Llama-3.2-3B-Instruct",
+                    "smart_model": "Qwen/Qwen2.5-72B-Instruct"},
+    "fireworks": {"key_field": "fireworks_api_key", "base_url": "https://api.fireworks.ai/inference/v1",
+                  "kind": "openai_compat", "fast_model": "accounts/fireworks/models/llama-v3p2-3b-instruct",
+                  "smart_model": "accounts/fireworks/models/llama-v3p1-70b-instruct"},
+    "deepinfra": {"key_field": "deepinfra_api_key", "base_url": "https://api.deepinfra.com/v1/openai",
+                  "kind": "openai_compat", "fast_model": "meta-llama/Llama-3.2-3B-Instruct",
+                  "smart_model": "meta-llama/Meta-Llama-3.1-70B-Instruct"},
+    "cohere": {"key_field": "cohere_api_key", "base_url": "https://api.cohere.ai/compatibility/v1",
+               "kind": "openai_compat", "fast_model": "command-r7b-12-2024", "smart_model": "command-r-plus-08-2024"},
+    # Cloudflare Workers AI needs an account id in the URL path (not just a key) --
+    # left out until CLOUDFLARE_ACCOUNT_ID is actually provided; wiring a base_url
+    # with a fake/missing account id would silently 404 forever, which is worse
+    # than not listing it. Add it here once that id is available:
+    # "cloudflare": {"key_field": "cloudflare_api_token",
+    #                "base_url": "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1", ...}
+    "lm_studio": {"key_field": None, "base_url": "http://localhost:1234/v1", "kind": "openai_compat",
+                  "fast_model": "local-model", "smart_model": "local-model"},
     "ollama": {"key_field": None, "base_url": "http://localhost:11434/v1", "kind": "openai_compat",
                "fast_model": "qwen2.5:3b", "smart_model": "qwen2.5-coder:14b"},
 }
@@ -1187,6 +1214,12 @@ class JarvisApp(tk.Tk):
             ("nvidia_nim_api_key", "NVIDIA NIM API Anahtari (7. tercih)", True),
             ("openrouter_api_key", "OpenRouter API Anahtari (8. tercih, yedek)", True),
             ("github_models_token", "GitHub Models Token (9. tercih, yedek)", True),
+            ("together_api_key", "Together AI API Anahtari", True),
+            ("sambanova_api_key", "SambaNova API Anahtari", True),
+            ("huggingface_api_key", "HuggingFace Inference API Anahtari", True),
+            ("fireworks_api_key", "Fireworks AI API Anahtari", True),
+            ("deepinfra_api_key", "DeepInfra API Anahtari", True),
+            ("cohere_api_key", "Cohere API Anahtari", True),
             ("smtp_host", "SMTP Sunucu (orn: smtp.gmail.com)", False),
             ("smtp_port", "SMTP Port (orn: 587)", False),
             ("smtp_user", "E-posta adresiniz", False),
@@ -1582,13 +1615,21 @@ class JarvisApp(tk.Tk):
         result = []
         for name in chain:
             info = PROVIDER_INFO[name]
-            key = self.config_data.get(info["key_field"]) or os.environ.get(info["key_field"].upper())
+            if info["key_field"] is None:
+                # Anahtar gerektirmeyen yerel saglayicilar (lm_studio, ollama...): key
+                # aramaya calismadan dahil et -- calismiyorsa zaten normal baglanti
+                # hatasi olarak elenir (circuit breaker devreye girer).
+                key = "local"
+            else:
+                key = self.config_data.get(info["key_field"]) or os.environ.get(info["key_field"].upper())
             if key:
                 result.append({"name": name, "api_key": key, "model": info[f"{tier}_model"], **info})
-        # Ollama: son care olarak her zaman denenir (anahtar gerekmez, calismiyorsa zaten baglanti hatasi verir)
-        ollama_info = PROVIDER_INFO["ollama"]
-        result.append({"name": "ollama", "api_key": "ollama", "model": ollama_info[f"{tier}_model"],
-                        **ollama_info})
+        # Ollama: zorunlu yerel yedek -- zincirde yoksa (baska bir tier listesinde
+        # cikarilmis olsa bile) son care olarak her zaman eklenir.
+        if "ollama" not in [p["name"] for p in result]:
+            ollama_info = PROVIDER_INFO["ollama"]
+            result.append({"name": "ollama", "api_key": "ollama", "model": ollama_info[f"{tier}_model"],
+                            **ollama_info})
         return result
 
     def _run_anthropic(self, provider, user_text, active_window):
