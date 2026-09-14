@@ -497,6 +497,7 @@ class JarvisApp(tk.Tk):
         self._subagent_depth = 0
         self._task_store = TaskStore(CONFIG_DIR / "tasks.json")
         self._current_task_id = None
+        self._cancel_requested = False
 
         self._build_ui()
         self._refresh_status()
@@ -544,6 +545,7 @@ class JarvisApp(tk.Tk):
         ttk.Button(btns, text="Hafiza", command=self._open_memory_viewer).pack(side="left", padx=6)
         ttk.Button(btns, text="Geri Al", command=self._undo_last_action).pack(side="left", padx=6)
         ttk.Button(btns, text="Yeni Gorev", command=self._new_task).pack(side="left", padx=6)
+        ttk.Button(btns, text="Iptal Et", command=self._cancel_task).pack(side="left", padx=6)
         ttk.Button(btns, text="n8n Ac", command=lambda: webbrowser.open(N8N_URL)).pack(side="left", padx=6)
         self.tts_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(btns, text="Sesli Yanit", variable=self.tts_var,
@@ -1167,6 +1169,16 @@ class JarvisApp(tk.Tk):
             self.chat_box.configure(state="disabled")
             self._log_system("Yeni gorev basladi.")
 
+    def _cancel_task(self):
+        """Su an calisan gorevi durdurur. Not: aktif bir API cagrisi devam ediyorsa
+        (ag bloklayici cagri) o cagri tamamlanir, ama bir sonraki arac-cagirma
+        turuna gecilmez -- gercek, dokumante edilmis granularite budur."""
+        if not self._current_task_id:
+            messagebox.showinfo("Iptal Et", "Su an calisan bir gorev yok.")
+            return
+        self._cancel_requested = True
+        self._log_system("Iptal istendi -- mevcut adim bitince gorev durdurulacak.")
+
     # ---------- Geri Al ----------
     def _undo_last_action(self):
         if not self._undo_stack:
@@ -1589,6 +1601,7 @@ class JarvisApp(tk.Tk):
         self.chat_entry.delete(0, "end")
         self._append_chat("Siz", text, "user")
 
+        self._cancel_requested = False
         task = self._task_store.create(text)
         self._current_task_id = task.id
         self._task_transition(TaskState.ANALYZING)
@@ -1670,6 +1683,10 @@ class JarvisApp(tk.Tk):
         self._log_system("(anthropic saglayicisi kullaniliyor)")
         try:
             for _ in range(6):
+                if self._cancel_requested:
+                    self._task_transition(TaskState.FAILED)
+                    self.after(0, lambda: self._append_chat("Sistem", "Gorev iptal edildi.", "system"))
+                    return True
                 tool_blocks = [b for b in resp.content if b.type == "tool_use"]
                 if not tool_blocks:
                     text = "".join(b.text for b in resp.content if b.type == "text") or "(bos yanit)"
@@ -1765,6 +1782,10 @@ class JarvisApp(tk.Tk):
 
         try:
             for _ in range(6):  # en fazla 6 arac-cagirma turu
+                if self._cancel_requested:
+                    self._task_transition(TaskState.FAILED)
+                    self.after(0, lambda: self._append_chat("Sistem", "Gorev iptal edildi.", "system"))
+                    return
                 msg = resp.choices[0].message
                 if not msg.tool_calls:
                     answer = msg.content or "(bos yanit)"
