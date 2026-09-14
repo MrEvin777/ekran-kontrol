@@ -33,7 +33,12 @@ def is_available() -> bool:
     return shutil.which("opencode") is not None
 
 
-def run_task(prompt: str, cwd: str, timeout_s: int = 120, model: str | None = None) -> dict:
+DEFAULT_MODEL = "google/gemini-3.1-flash-lite"  # GERCEKTEN test edildi, dosya olusturdu -- ucretsiz DEGIL
+# (~$0.01/cagri, google_api_key'in kotasindan). "gemini-3-pro-image" (opencode'un
+# kendi varsayilani) sifir ucretsiz kotaya sahip, bu yuzden onun yerine kullanildi.
+
+
+def run_task(prompt: str, cwd: str, timeout_s: int = 120, model: str | None = DEFAULT_MODEL) -> dict:
     """One-shot: runs `opencode run` in `cwd`, returns the final text output plus
     every tool_use event seen (for the caller to log/checkpoint)."""
     exe = shutil.which("opencode")
@@ -47,9 +52,16 @@ def run_task(prompt: str, cwd: str, timeout_s: int = 120, model: str | None = No
         if model:
             args += ["--model", model]
         args.append(prompt)
+        env = _opencode_env()
+        # opencode resolves its project root from the inherited PWD env var, not
+        # from the OS process cwd -- without this it silently writes into
+        # whatever directory this Python process's PWD happened to be (a real bug
+        # this caught: subprocess cwd=tmp_path, but opencode wrote into
+        # C:\Users\muslu\OmniAI because that was the parent shell's stale PWD).
+        env["PWD"] = cwd
         proc = subprocess.run(
             args, cwd=cwd, capture_output=True, text=True, timeout=timeout_s, stdin=subprocess.DEVNULL,
-            env=_opencode_env(),
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"opencode {timeout_s}s icinde bitmedi"}
@@ -66,20 +78,30 @@ def run_task(prompt: str, cwd: str, timeout_s: int = 120, model: str | None = No
         except Exception:
             continue
 
+    # Real observed shape (opencode 1.18.26): {"type":"tool_use","part":{"type":
+    # "tool","tool":"write","state":{"input":{...},"output":"..."}}} and
+    # {"type":"text","part":{"type":"text","text":"..."}} -- the payload is
+    # nested under "part", not at the event's top level.
     tool_events = [e for e in events if e.get("type") == "tool_use"]
     text_events = [e for e in events if e.get("type") == "text"]
     error_events = [e for e in events if e.get("type") == "error"]
-    final_text = "".join(e.get("text", "") for e in text_events)
+    final_text = "".join(e.get("part", {}).get("text", "") for e in text_events)
 
     # opencode exits 0 even on a provider/auth error -- the JSON stream is the
     # real signal, not the process exit code.
     ok = proc.returncode == 0 and not error_events
     error_summary = "; ".join(e.get("error", {}).get("message", str(e.get("error"))) for e in error_events)
 
+    tool_calls = []
+    for e in tool_events:
+        part = e.get("part", {})
+        state = part.get("state", {})
+        tool_calls.append({"name": part.get("tool"), "input": state.get("input"), "output": state.get("output")})
+
     return {
         "ok": ok,
         "text": final_text,
-        "tool_calls": [{"name": e.get("name"), "input": e.get("input")} for e in tool_events],
+        "tool_calls": tool_calls,
         "returncode": proc.returncode,
         "error": error_summary if error_events else None,
         "stderr": proc.stderr[-2000:] if proc.returncode != 0 else "",
