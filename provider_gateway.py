@@ -76,6 +76,11 @@ class PerformanceMetrics:
         out.append(success)
         del lat[: -self.window]
         del out[: -self.window]
+        try:
+            import memory_db
+            memory_db.record_provider_usage(provider_name, latency_s, success)
+        except Exception:
+            pass
 
     def summary(self) -> dict[str, dict]:
         result = {}

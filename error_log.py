@@ -17,6 +17,11 @@ def log_error(category: str, detail: dict) -> None:
     entry = {"ts": time.time(), "category": category, **detail}
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        import memory_db
+        memory_db.record_error(category, detail)
+    except Exception:
+        pass
 
 
 def read_recent(n: int = 50) -> list[dict]:

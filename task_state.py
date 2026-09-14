@@ -107,6 +107,11 @@ class TaskStore:
         data = self._read()
         data[task.id] = task.to_dict()
         self._write(data)
+        try:
+            import memory_db
+            memory_db.record_task(task.id, task.goal, task.state.value, task.created_at, task.updated_at)
+        except Exception:
+            pass  # SQLite aynasi ikincil -- JSON dosyasi zaten gercek kaynagi, burda hata gorevi engellemez
 
     def list_resumable(self) -> list[Task]:
         return [t for t in (Task.from_dict(v) for v in self._read().values()) if t.state == TaskState.RESUMABLE]
